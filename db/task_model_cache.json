@@ -1,0 +1,9 @@
+{
+  "evaluation": {
+    "model": "gemini-3.5-flash",
+    "provider": "gemini",
+    "updated_at": 1787355638.5231626,
+    "arena_score": 79.8760433566327,
+    "latency_ms": 20513
+  }
+}

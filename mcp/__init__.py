@@ -1,0 +1,1 @@
+"""Paquete MCP. Implementación de la capa de comunicación estructurada entre componentes del sistema."""

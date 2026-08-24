@@ -1,0 +1,1 @@
+"""Módulo de habilidades. Almacena y carga herramientas reutilizables que los agentes pueden invocar durante la ejecución."""

@@ -1,0 +1,1 @@
+"""Módulo core. Contiene la lógica central de orquestación y planificación del agente APA."""

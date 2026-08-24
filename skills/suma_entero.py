@@ -1,0 +1,3 @@
+# apa/skills/suma_entero.py
+
+SKILL = {'name': 'suma_entero', 'keywords': ['suma', 'enteros', 'funcion', 'tipado', 'python'], 'prompt_fragment': 'Implementar función suma(a, b) que retorna la suma de dos enteros con tipado estático. Usar type hints para claridad. Incluir bloque main con prueba de validez básica. Manejar excepciones para robustez. Mantener código simple y directo.', 'example_code': "def suma(a: int, b: int) -> int:\n    # Retorna la suma de dos enteros\n    return a + b\n\nif __name__ == '__main__':\n    try:\n        if suma(2, 3) == 5:\n            print('CRITERIO OK')\n        else:\n            print('CRITERIO FALLO: resultado incorrecto')\n    except Exception as e:\n        print(f'CRITERIO FALLO: {e}')"}

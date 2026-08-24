@@ -1,0 +1,1 @@
+"""Paquete de agentes. Colección de módulos especializados en generación y corrección autónoma de código."""

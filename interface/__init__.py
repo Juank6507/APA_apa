@@ -1,0 +1,1 @@
+"""Paquete de interfaz. Contiene los componentes para la exposición y gestión de la UI web local."""
