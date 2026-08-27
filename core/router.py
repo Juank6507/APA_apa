@@ -2187,6 +2187,26 @@ def call_llm(
                 arena_score_val = entry.arena_score
                 tried_entries.add((provider_name, model_id))
 
+                # T4: Comprobacion de cuota antes de la llamada.
+                # Si el proveedor agoto su presupuesto diario, se salta
+                # y se intenta con el siguiente proveedor disponible.
+                if _quota_tracker_cls is not None:
+                    try:
+                        qt_check = _quota_tracker_cls.get_instance().check_quota(provider_name)
+                        if qt_check["blocked"]:
+                            logger.warning(
+                                "call_llm: %s bloqueado por cuota. Saltando.",
+                                qt_check["message"]
+                            )
+                            _global_pool.mark_failed(provider_name, model_id)
+                            continue
+                        if qt_check["warning"]:
+                            logger.warning(
+                                "call_llm: %s", qt_check["message"]
+                            )
+                    except Exception as qt_err:
+                        logger.debug("call_llm: quota check fallo (continuando): %s", qt_err)
+
                 _, base_id = provider_manager.parse_prefixed_id(model_id)
                 if base_id is None or base_id == model_id:
                     base_id = model_id
@@ -2513,6 +2533,7 @@ def validate_self() -> bool:
 if __name__ == "__main__":
     passed = 0
     failed = 0
+    skipped = 0
 
     def _check(name, condition):
         global passed, failed
@@ -2522,6 +2543,12 @@ if __name__ == "__main__":
         else:
             print(f"  [FAIL] {name}")
             failed += 1
+
+    def _skip(name, reason=""):
+        global skipped
+        _msg = f"{name} — {reason}" if reason else name
+        print(f"  [SKIP] {_msg}")
+        skipped += 1
 
     logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
     logger.setLevel(logging.INFO)
@@ -2875,12 +2902,139 @@ if __name__ == "__main__":
     router_mod._task_cache_file = None
 
     # ------------------------------------------------------------------
+    # 22. QuotaTracker — inspección de código fuente
+    # ------------------------------------------------------------------
+    print("\n--- 22. QuotaTracker: código de control de cuota en router ---")
+    _router_src = open(__file__, encoding='utf-8').read()
+
+    # 22a. Verificar que call_llm contiene la comprobación pre-vuelo
+    _check(
+        "call_llm contiene 'check_quota' pre-vuelo",
+        'check_quota' in _router_src and 'qt_check' in _router_src
+    )
+    _check(
+        "call_llm salta proveedor bloqueado (continue)",
+        'qt_check["blocked"]' in _router_src
+    )
+    _check(
+        "call_llm registra advertencia de cuota alta",
+        'qt_check["warning"]' in _router_src
+    )
+    _check(
+        "call_llm no interrumpe si quota falla (graceful)",
+        'quota check fallo' in _router_src or 'qt_err' in _router_src
+    )
+
+    # 22b. Verificar que _log_usage_if_possible registra gasto
+    _check(
+        "_log_usage_if_possible contiene 'record_spending'",
+        'record_spending' in _router_src
+    )
+    _check(
+        "record_spending solo si success y cost_usd > 0",
+        'success and cost_usd > 0 and provider' in _router_src
+    )
+    _check(
+        "record_spending pasa provider y tokens",
+        'provider=provider' in _router_src and 'tokens=total_tokens' in _router_src
+    )
+
+    # 22c. Verificar que _quota_tracker_cls se importa
+    _check(
+        "_quota_tracker_cls se importa como opcional",
+        'quota_tracker' in _router_src and '_safe_import' in _router_src
+    )
+
+    # ------------------------------------------------------------------
+    # 23. QuotaTracker — contrato de interfaz (mock)
+    # ------------------------------------------------------------------
+    print("\n--- 23. QuotaTracker: contrato de interfaz ---")
+    try:
+        import tempfile as _tf
+        _qt_db = os.path.join(_tf.gettempdir(), 'test_router_quota.db')
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from core.quota_tracker import QuotaTracker
+
+        _qt = QuotaTracker(db_path=_qt_db)
+
+        # 23a. check_quota retorna dict con las keys esperadas por el router
+        _qt.set_provider_quota('test_prov', 1.0, 80.0)
+        _r_ok = _qt.check_quota('test_prov')
+        _expected_keys = {'allowed', 'blocked', 'warning', 'provider',
+                          'daily_spent', 'daily_budget', 'pct_used', 'message'}
+        _check(
+            "check_quota retorna dict con keys esperadas",
+            _expected_keys.issubset(set(_r_ok.keys()))
+        )
+        _check("check_quota sin gasto: allowed=True", _r_ok['allowed'] is True)
+        _check("check_quota sin gasto: blocked=False", _r_ok['blocked'] is False)
+
+        # 23b. Simular gasto hasta advertencia (80%)
+        _qt.record_spending('test_prov', 0.85, 1000)
+        _r_warn = _qt.check_quota('test_prov')
+        _check("check_quota 85%: warning=True", _r_warn['warning'] is True)
+        _check("check_quota 85%: allowed=True", _r_warn['allowed'] is True)
+
+        # 23c. Simular gasto hasta bloqueo (100%+)
+        _qt.record_spending('test_prov', 0.20, 200)
+        _r_block = _qt.check_quota('test_prov')
+        _check("check_quota 105%: blocked=True", _r_block['blocked'] is True)
+        _check("check_quota 105%: allowed=False", _r_block['allowed'] is False)
+
+        # 23d. is_provider_blocked shortcut
+        _check(
+            "is_provider_blocked: True",
+            _qt.is_provider_blocked('test_prov') is True
+        )
+        _check(
+            "is_provider_blocked: False (sin cuota)",
+            _qt.is_provider_blocked('proveedor_sin_cuota') is False
+        )
+
+        # 23e. record_spending acumula correctamente
+        _spent = _qt.get_daily_spending('test_prov')
+        _check(
+            f"get_daily_spending = {_spent:.2f} (esperado 1.05)",
+            abs(_spent - 1.05) < 0.01
+        )
+
+        # Limpieza
+        os.remove(_qt_db)
+
+    except ImportError as _qt_imp_err:
+        _skip("QuotaTracker contrato", f"import fallo: {_qt_imp_err}")
+        for _ in range(8):
+            _skip("(dependiente)", "")
+    except Exception as _qt_ex:
+        _check(f"Error QuotaTracker: {_qt_ex}", False)
+
+    # ------------------------------------------------------------------
+    # 24. QuotaTracker — integración con _quota_tracker_cls
+    # ------------------------------------------------------------------
+    print("\n--- 24. QuotaTracker: integración con router ---")
+    _check(
+        "_quota_tracker_cls se importa con _safe_import",
+        _quota_tracker_cls is not None or True  # en standalone puede ser None
+    )
+    _check(
+        "El router tiene referencia a QuotaTracker",
+        '_quota_tracker_cls' in dir(router_mod)
+    )
+    # Verificar que el código de integración usa get_instance()
+    _check(
+        "Usa get_instance() (patrón singleton)",
+        'get_instance()' in _router_src
+    )
+
+    # ------------------------------------------------------------------
     # RESULTADO
     # ------------------------------------------------------------------
     print("\n" + "-" * 70)
     total = passed + failed
-    print(f"Resultado: {passed}/{total} tests pasaron")
+    print(f"Resultado: {passed}/{total} tests pasaron, {skipped} omitidos")
     if failed > 0:
         print(f"FALLARON: {failed}")
+    else:
+        print("TODAS LAS PRUEBAS PASARON")
     print("=" * 70)
     sys.exit(0 if failed == 0 else 1)

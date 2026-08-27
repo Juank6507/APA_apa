@@ -1,6 +1,9 @@
 # apa/core/planner.py
 # -*- coding: utf-8 -*-
-"""
+"""Planner — Generación y gestión de planes de tareas."""
+import json
+import logging
+import re
 import sys as _sys
 from pathlib import Path
 from datetime import datetime, timezone
@@ -56,7 +59,7 @@ _SECTION_PATTERN = re.compile(r"^(#{2,3})\s+(.+)$", re.MULTILINE)
 _H1_PATTERN = re.compile(r"^#\s+(.+)$", re.MULTILINE)
 _YAML_PATTERN = re.compile(r"^---\s*\n", re.MULTILINE)
 
-# Mapeo tipo de tarea → ejecutor predeterminado
+# Mapeo tipo de tarea -> ejecutor predeterminado
 _EXECUTOR_MAP: Dict[str, str] = {
     "code_generation": "apa",
     "analysis": "apa",
@@ -71,7 +74,7 @@ _EXECUTOR_MAP: Dict[str, str] = {
     "design": "user",
 }
 
-# Mapeo tipo de tarea → prioridad base
+# Mapeo tipo de tarea -> prioridad base
 _PRIORITY_MAP: Dict[str, str] = {
     "code_generation": "high",
     "analysis": "medium",
@@ -121,7 +124,7 @@ CRÍTICO: Cada tarea DEBE incluir estos campos exactos:
 - "priority": uno de: "critical", "high", "medium", "low"
 
 REGLAS PARA ASIGNAR executor:
-- "apa": tareas de código, análisis, tests, configuración técnica → el sistema las ejecuta
+- "apa": tareas de código, análisis, tests, configuración técnica -> el sistema las ejecuta
 - "user": tareas que requieren decisión humana, aprobación, feedback, diseño visual
 - "system": tareas de infraestructura (despliegue, DNS, certificados, servidores)
 
@@ -1063,24 +1066,24 @@ Frontend en React con TypeScript.
     # 5. Probar inferencia de executor
     task_apa = {"name": "Crear endpoint de login", "task_type": "code_generation"}
     assert planner._infer_executor(task_apa) == "apa"
-    print("[OK] Inferencia executor: code_generation → apa")
+    print("[OK] Inferencia executor: code_generation -> apa")
 
     task_user = {"name": "Aprobar diseño visual del dashboard", "task_type": "design"}
     assert planner._infer_executor(task_user) == "user"
-    print("[OK] Inferencia executor: diseño visual → user")
+    print("[OK] Inferencia executor: diseño visual -> user")
 
     task_system = {"name": "Desplegar en AWS", "task_type": "deployment"}
     assert planner._infer_executor(task_system) == "system"
-    print("[OK] Inferencia executor: deployment → system")
+    print("[OK] Inferencia executor: deployment -> system")
 
     # 6. Probar inferencia de priority
     task_critical = {"name": "Setup", "task_type": "setup"}
     assert planner._infer_priority(task_critical, 0, 10) == "critical"
-    print("[OK] Inferencia priority: setup(index=0) → critical")
+    print("[OK] Inferencia priority: setup(index=0) -> critical")
 
     task_low = {"name": "Docs", "task_type": "documentation"}
     assert planner._infer_priority(task_low, 5, 10) == "low"
-    print("[OK] Inferencia priority: documentation → low")
+    print("[OK] Inferencia priority: documentation -> low")
 
     # 7. Probar ensure_executor_and_priority
     raw_tasks = [

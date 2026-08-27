@@ -1,9 +1,7 @@
 {
-  "evaluation": {
-    "model": "gemini-3.5-flash",
-    "provider": "gemini",
-    "updated_at": 1787355638.5231626,
-    "arena_score": 79.8760433566327,
-    "latency_ms": 20513
+  "chat": {
+    "model": "gpt-4o",
+    "provider": "openai",
+    "updated_at": 1787679144.9986715
   }
 }

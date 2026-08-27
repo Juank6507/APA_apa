@@ -236,6 +236,24 @@ class Settings:
     def model_broker_config(self) -> Dict[str, str]:
         return _get_mb_config()
 
+    @property
+    def model_broker_start_cmd(self) -> str:
+        """Comando para arrancar MB en modo sandbox (desarrollo).
+
+        Si esta vacio, APA no intenta arrancar MB localmente.
+        Ejemplo: 'bun --hot index.ts'
+        """
+        return os.environ.get("MODEL_BROKER_START_CMD", "").strip()
+
+    @property
+    def model_broker_start_dir(self) -> str:
+        """Directorio de trabajo para arrancar MB en modo sandbox.
+
+        Lee SANDBOX_PATH del entorno (misma variable que el sandbox general).
+        Si esta vacio, APA no intenta arrancar MB localmente.
+        """
+        return os.environ.get("SANDBOX_PATH", "").strip()
+
     # --- Emergency (Ollama local) ---
     @property
     def emergency_keys(self) -> Dict[str, str]:
@@ -304,6 +322,17 @@ def _log_startup_warnings() -> None:
         logger.info(
             "settings: Model Broker configurado en %s",
             settings.model_broker_url
+        )
+
+    if settings.model_broker_start_cmd:
+        logger.info(
+            "settings: MB sandbox configurado: cmd='%s', dir='%s'",
+            settings.model_broker_start_cmd,
+            settings.model_broker_start_dir,
+        )
+    else:
+        logger.info(
+            "settings: MB sandbox no configurado (sin MODEL_BROKER_START_CMD o SANDBOX_PATH)"
         )
 
     logger.info(

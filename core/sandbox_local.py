@@ -223,6 +223,21 @@ class LocalConnector:
                     "stderr": f"Lenguaje no soportado en sandbox local: {language}"
                 }
 
+            # Arnés NAS: verificar si el lenguaje esta instalado en esta PC.
+            # Si no lo esta, informar al usuario con instrucciones de instalacion.
+            try:
+                from core.sandbox_health import is_language_available, format_missing_languages_message
+                if not is_language_available(language):
+                    missing_msg = format_missing_languages_message([language])
+                    return {
+                        "success": False,
+                        "stdout": "",
+                        "stderr": missing_msg,
+                        "language_missing": True,
+                    }
+            except Exception as check_exc:
+                logger.debug("No se pudo verificar disponibilidad de %s: %s", language, check_exc)
+
             config = lang_config[language]
             ext = config["ext"]
             filepath = self._write_temp_file(code, ext)

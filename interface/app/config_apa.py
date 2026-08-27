@@ -150,6 +150,14 @@ MODEL_BROKER_URL: str = (
     getattr(settings, "MODEL_BROKER_URL", None) if settings else None
 ) or "http://127.0.0.1:8100"
 
+MODEL_BROKER_START_CMD: str = (
+    getattr(settings, "model_broker_start_cmd", None) if settings else None
+) or ""
+
+MODEL_BROKER_START_DIR: str = (
+    getattr(settings, "model_broker_start_dir", None) if settings else None
+) or ""
+
 OLLAMA_BASE_URL: str = (
     getattr(settings, "OLLAMA_BASE_URL", None) if settings else None
 ) or "http://localhost:11434"

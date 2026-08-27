@@ -216,9 +216,8 @@ class ChatEngine:
         try:
             notify(
                 "chat:response",
-                project_id=project_id,
-                model=model_name,
-                elapsed=round(elapsed, 2),
+                f"Respuesta generada ({model_name}, {elapsed:.1f}s)",
+                {"project_id": project_id, "model": model_name, "elapsed": round(elapsed, 2)},
             )
         except Exception as exc:
             logger.debug("ChatEngine: Error al notificar: %s", exc)
@@ -320,11 +319,31 @@ class ChatEngine:
         Raises:
             HTTPException: Si la llamada falla tras reintentos.
         """
+        # Extraer system_prompt y user_prompt de la lista de mensajes
+        system_prompt = ""
+        user_prompt = ""
+        for msg in messages:
+            role = msg.get("role", "")
+            content = msg.get("content", "")
+            if role == "system" and content:
+                system_prompt = content
+            elif role == "user" and content:
+                user_prompt = content
+
         try:
-            response = await asyncio.to_thread(
-                call_llm, messages, model=model, **kwargs
+            result = await asyncio.to_thread(
+                call_llm, "chat", system_prompt, user_prompt,
             )
-            return response
+            # call_llm retorna un dict — extraer el texto de la respuesta
+            if isinstance(result, dict):
+                content = result.get("content", "")
+                if content:
+                    return content
+                # Si no hay contenido pero hay error, informar
+                error_msg = result.get("error", "")
+                if error_msg:
+                    raise Exception(error_msg)
+            return str(result) if result else ""
         except Exception as exc:
             logger.error(
                 "ChatEngine: Error en call_llm (model=%s): %s", model, exc

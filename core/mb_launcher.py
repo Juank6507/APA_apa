@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 import os
 import time
+import platform
 import subprocess
 import logging
 import requests
@@ -23,18 +24,33 @@ logger = logging.getLogger("core.mb_launcher")
 _mb_process = None  # subprocess.Popen or None
 
 
-def ensure_mb_running(mb_url: str, timeout: float = 15.0) -> bool:
+def _notify_progress(on_progress, step: str, message: str, data: dict = None) -> None:
+    """Envía notificación de progreso si hay callback disponible."""
+    if on_progress is None:
+        return
+    try:
+        on_progress(step, message, data or {})
+    except Exception:
+        pass
+
+
+def ensure_mb_running(mb_url: str, timeout: float = 15.0,
+                       on_progress=None, start_cmd: str = "", start_dir: str = "") -> bool:
     """Asegura que MB esté corriendo y respondiendo por HTTP.
 
-    Flujo:
-    1. Si MB ya responde (arrancado externamente o por APA) → retorna True.
-    2. Si MB no responde → lanza MB como subprocess silencioso.
-    3. Espera hasta ``timeout`` segundos a que MB esté listo.
-    4. Si no levanta en tiempo → retorna False (APA usará emergency harness).
+    Flujo (3 niveles):
+    1. Verificar si MB ya responde en la URL (producción).
+    2. Si no responde, intentar arrancar sandbox local (desarrollo).
+    3. Si tampoco, retorna False (APA usará emergency harness).
+
+    En cada paso se notifica el progreso si se proporciona on_progress.
 
     Args:
         mb_url: URL base de MB, ej. ``http://127.0.0.1:8100``.
-        timeout: Máximos segundos a esperar tras lanzar el subprocess.
+        timeout: Máximos segundos a esperar tras lanzar el sandbox.
+        on_progress: Callback(step, message, data) para notificaciones.
+        start_cmd: Comando para arrancar el sandbox (ej. ``bun --hot index.ts``).
+        start_dir: Directorio de trabajo del sandbox.
 
     Returns:
         True si MB responde, False si no se pudo iniciar.
@@ -43,6 +59,7 @@ def ensure_mb_running(mb_url: str, timeout: float = 15.0) -> bool:
 
     if not mb_url or not mb_url.strip():
         logger.debug("ensure_mb_running: sin URL configurada, skip")
+        _notify_progress(on_progress, "no_url", "Sin URL de MB configurada")
         return False
 
     mb_url = mb_url.rstrip("/")
@@ -56,45 +73,66 @@ def ensure_mb_running(mb_url: str, timeout: float = 15.0) -> bool:
         _terminate_process(_mb_process)
         _mb_process = None
 
-    # 2. Health check — MB puede haber sido arrancado externamente
+    # ── NIVEL 1: MB responde en la URL configurada (producción) ──
+    _notify_progress(on_progress, "checking_url", "Verificando MB en la URL configurada...")
     if _health_check(mb_url):
         logger.info("MB ya corriendo en %s", mb_url)
+        _notify_progress(on_progress, "mb_running", "MB responde correctamente")
         return True
 
-    # 3. Lanzar MB como subprocess silencioso
-    cwd = _find_mb_directory()
-    try:
-        _mb_process = subprocess.Popen(
-            [sys.executable, "-m", "model_broker.app"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
-            start_new_session=True,  # detach del process group de APA
-            cwd=cwd,
-        )
-        logger.info("MB lanzado como subprocess (PID: %d, cwd: %s)", _mb_process.pid, cwd)
-    except FileNotFoundError:
-        logger.warning("No se encontró el módulo model_broker.app (cwd: %s)", cwd)
-        return False
-    except Exception as e:
-        logger.warning("Error lanzando MB: %s", e)
+    _notify_progress(on_progress, "url_failed", "MB no responde en la URL, intentando sandbox local...")
+
+    # ── NIVEL 2: Arrancar sandbox local (desarrollo) ──
+    if not start_cmd or not start_dir:
+        logger.warning("Sin configuración de sandbox (start_cmd/start_dir vacíos)")
+        _notify_progress(on_progress, "no_sandbox_config", "No hay configuración de sandbox, MB no disponible")
         return False
 
-    # 4. Esperar a que MB esté listo
+    _notify_progress(on_progress, "launching_sandbox", "Lanzando sandbox de MB...")
+
+    cwd = start_dir
+    try:
+        cmd_parts = start_cmd.split()
+        popen_kwargs = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "stdin": subprocess.DEVNULL,
+            "cwd": cwd,
+        }
+        # Compatibilidad Windows/Linux para detach del proceso
+        if platform.system() == "Windows":
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            popen_kwargs["start_new_session"] = True
+
+        _mb_process = subprocess.Popen(cmd_parts, **popen_kwargs)
+        logger.info("MB sandbox lanzado (PID: %d, cwd: %s, cmd: %s)", _mb_process.pid, cwd, start_cmd)
+    except FileNotFoundError:
+        logger.warning("Comando no encontrado al lanzar sandbox: %s (cwd: %s)", start_cmd, cwd)
+        _notify_progress(on_progress, "sandbox_cmd_not_found", "Comando del sandbox no encontrado")
+        return False
+    except Exception as e:
+        logger.warning("Error lanzando sandbox: %s", e)
+        _notify_progress(on_progress, "sandbox_error", f"Error al lanzar sandbox: {e}")
+        return False
+
+    # Esperar a que el sandbox esté listo
     deadline = time.time() + timeout
     while time.time() < deadline:
         if _mb_process.poll() is not None:
-            logger.warning(
-                "MB proceso salió con código %d", _mb_process.returncode
-            )
+            logger.warning("MB sandbox salió con código %d", _mb_process.returncode)
+            _notify_progress(on_progress, "sandbox_crashed", "El sandbox de MB se cerró inesperadamente")
             return False
         if _health_check(mb_url):
             elapsed = timeout - (deadline - time.time())
-            logger.info("MB listo en %s (%.1fs)", mb_url, elapsed)
+            logger.info("MB sandbox listo en %s (%.1fs)", mb_url, elapsed)
+            _notify_progress(on_progress, "sandbox_ready", "MB sandbox levantado correctamente",
+                             {"elapsed_seconds": round(elapsed, 1)})
             return True
         time.sleep(0.5)
 
-    logger.warning("MB no respondió en %.1fs", timeout)
+    logger.warning("MB sandbox no respondió en %.1fs", timeout)
+    _notify_progress(on_progress, "sandbox_timeout", f"MB sandbox no respondió en {timeout:.1f}s")
     return False
 
 
@@ -209,22 +247,15 @@ if __name__ == "__main__":
     _check("URL vacía → False", ensure_mb_running("") is False)
     _check("URL None → False", ensure_mb_running(None) is False)
 
-    # --- 4. ensure_mb_running con URL que no responde ---
-    print("\n--- 4. ensure_mb_running URL inalcanzable ---")
-    # Mock subprocess.Popen para que no lance nada real
-    _orig_health = _health_check
-    _health_check = lambda *a, **kw: False
+    # --- 4. ensure_mb_running URL inalcanzable sin sandbox → False ---
+    print("\n--- 4. ensure_mb_running URL inalcanzable sin sandbox ---")
+    _orig_health = globals()['_health_check']
+    globals()['_health_check'] = lambda *a, **kw: False
     try:
-        with mock.patch("subprocess.Popen") as mock_popen:
-            mock_proc = mock.MagicMock()
-            mock_proc.poll.return_value = 42  # simulamos que el proceso sale
-            mock_popen.return_value = mock_proc
-            result = ensure_mb_running("http://127.0.0.1:19999", timeout=1.0)
-        _check("Inalcanzable → False", result is False)
+        # Sin start_cmd ni start_dir, debe retornar False sin intentar subprocess
+        result = ensure_mb_running("http://127.0.0.1:19999", timeout=1.0)
+        _check("Inalcanzable sin sandbox → False", result is False)
     finally:
-        # Restaurar (a nivel de modulo)
-        import types as _types
-        _mod = _types.ModuleType("temp_fix")
         globals()['_health_check'] = _orig_health
 
     # --- 5. ensure_mb_running con health check OK (sin lanzar) ---
@@ -256,6 +287,58 @@ if __name__ == "__main__":
     # --- 8. _health_check con URL inválida ---
     print("\n--- 8. _health_check ---")
     _check("URL inválida → False", _health_check("http://0.0.0.0:1", timeout=0.5) is False)
+
+    # --- 9. on_progress callback recibe notificaciones ---
+    print("\n--- 9. on_progress callback ---")
+    globals()['_health_check'] = lambda *a, **kw: False
+    _captured = []
+    def _capture(step, message, data=None):
+        _captured.append((step, message, data))
+    try:
+        ensure_mb_running("http://127.0.0.1:19999", timeout=1.0, on_progress=_capture)
+        _check("Callback fue llamado", len(_captured) > 0)
+        _check("Primer paso = checking_url", _captured[0][0] == "checking_url")
+        _check("Segundo paso = url_failed", len(_captured) > 1 and _captured[1][0] == "url_failed")
+        _check("Tercer paso = no_sandbox_config", len(_captured) > 2 and _captured[2][0] == "no_sandbox_config")
+    finally:
+        globals()['_health_check'] = _orig_health
+
+    # --- 10. Sandbox con start_cmd pero proceso falla ---
+    print("\n--- 10. Sandbox launch con proceso que falla ---")
+    globals()['_health_check'] = lambda *a, **kw: False
+    _captured2 = []
+    def _capture2(step, message, data=None):
+        _captured2.append((step, message, data))
+    try:
+        with mock.patch("subprocess.Popen") as mock_popen:
+            mock_proc = mock.MagicMock()
+            mock_proc.poll.return_value = 42  # simulamos que el proceso sale
+            mock_popen.return_value = mock_proc
+            result = ensure_mb_running(
+                "http://127.0.0.1:19999", timeout=1.0,
+                on_progress=_capture2,
+                start_cmd="bun --hot index.ts",
+                start_dir="/tmp/fake-sandbox",
+            )
+        _check("Sandbox fallido → False", result is False)
+        _check("Callback incluye launching_sandbox", any(s[0] == "launching_sandbox" for s in _captured2))
+        _check("Callback incluye sandbox_crashed", any(s[0] == "sandbox_crashed" for s in _captured2))
+    finally:
+        globals()['_health_check'] = _orig_health
+
+    # --- 11. _notify_progress sin callback no explota ---
+    print("\n--- 11. _notify_progress ---")
+    try:
+        _notify_progress(None, "test", "msg")
+        _check("Sin callback no explota", True)
+    except Exception:
+        _check("Sin callback no explota", False)
+
+    try:
+        _notify_progress(lambda *a, **kw: 1/0, "test", "msg")  # callback que lanza excepción
+        _check("Callback que falla no propaga", True)
+    except Exception:
+        _check("Callback que falla no propaga", False)
 
     # --- RESULTADO ---
     print("\n" + "-" * 70)

@@ -25,7 +25,6 @@ _THIS_DIR = Path(__file__).resolve()
 sys.path.insert(0, str(_THIS_DIR.parent.parent))        # interface/ → resuelve 'app'
 sys.path.insert(0, str(_THIS_DIR.parent.parent.parent))  # apa/ → resuelve 'core', 'config'
 
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
@@ -36,6 +35,7 @@ from app.state import AppState
 
 # Módulo funcional — import directo
 from core.notifications import register_callback
+from core.notification_ui_bridge import format_event
 
 
 # ── Constantes ────────────────────────────────────────────────────────────
@@ -68,25 +68,38 @@ class SSEManager:
     def register_notification_callback(self) -> None:
         """Registra un callback con core.notifications.register_callback.
 
-        El callback recibe un dict de evento y lo añade al buffer SSE
-        usando el lock de threading de state.sse_buffer_lock.
+        El callback recibe un dict de evento, lo formatea con
+        format_event() para añadir time_str/color/category/prefix,
+        y lo añade al buffer SSE.
         """
-        def _on_notification(event: dict) -> None:
-            """Callback interno que añade eventos al buffer SSE.
+        def _on_notification(event_type: str, message: str, data: dict) -> None:
+            """Callback interno que añade eventos formateados al buffer SSE.
 
             Args:
-                event: Diccionario del evento recibido.
+                event_type: Tipo de evento (ej. 'system:startup').
+                message: Mensaje legible para el usuario.
+                data: Datos estructurados del evento.
             """
-            enriched = {
-                "type": event.get("type", "notification"),
-                "project_id": event.get("project_id", ""),
-                "message": event.get("message", ""),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "data": event.get("data", {}),
+            raw_event = {
+                'type': event_type,
+                'message': message,
+                'data': data or {},
+                'timestamp': time.time(),
             }
+            try:
+                formatted = format_event(raw_event)
+                # Preservar project_id si viene en data para filtrado SSE
+                pid = (data or {}).get('project_id', '')
+                if pid:
+                    formatted['project_id'] = pid
+                else:
+                    formatted.setdefault('project_id', '')
+            except Exception:
+                formatted = raw_event
+                formatted.setdefault('project_id', (data or {}).get('project_id', ''))
             with self.state.sse_buffer_lock:
-                self.state.sse_buffer.append(enriched)
-            logger.debug("SSE: evento recibido tipo=%s", enriched["type"])
+                self.state.sse_buffer.append(formatted)
+            logger.debug("SSE: evento recibido tipo=%s", formatted.get("type"))
 
         try:
             register_callback(_on_notification)
@@ -100,11 +113,17 @@ class SSEManager:
         """Añade un evento al buffer SSE.
 
         Args:
-            event: Diccionario con al menos 'type', 'project_id', 'message'.
-                   Se enriquece automáticamente con timestamp si no lo tiene.
+            event: Diccionario con al menos 'type', 'message'.
+                   Se formatea con format_event() si tiene timestamp numérico.
         """
         if "timestamp" not in event:
-            event["timestamp"] = datetime.now(timezone.utc).isoformat()
+            event["timestamp"] = time.time()
+        try:
+            formatted = format_event(event)
+            formatted.setdefault('project_id', event.get('project_id', ''))
+            event = formatted
+        except Exception:
+            event.setdefault('project_id', event.get('project_id', ''))
         with self.state.sse_buffer_lock:
             self.state.sse_buffer.append(event)
         logger.debug("SSE: evento añadido tipo=%s", event.get("type"))
@@ -220,27 +239,33 @@ if __name__ == "__main__":
     assert events == [], "El buffer debe estar vacío al inicio"
     print("[OK] Buffer inicial vacío")
 
-    # 3. Añadir eventos y verificar estructura
+    # 3. Añadir eventos y verificar que tienen campos de formato
     sse.add_event({
-        "type": "status",
+        "type": "mb:startup",
         "project_id": "proj_001",
-        "message": "Iniciando análisis",
-        "data": {"progress": 10},
+        "message": "Verificando MB en la URL configurada...",
+        "data": {"step": "checking_url"},
     })
     sse.add_event({
-        "type": "progress",
+        "type": "agent:progress",
         "project_id": "proj_002",
         "message": "50% completado",
     })
 
     all_events = sse.get_events()
     assert len(all_events) == 2
-    assert all_events[0]["type"] == "status"
-    assert all_events[0]["project_id"] == "proj_001"
-    assert "timestamp" in all_events[0]
-    print("[OK] add_event() añade eventos con estructura correcta")
+    # TEST CRÍTICO: verificar campos de formato para la UI
+    evt1 = all_events[0]
+    assert evt1["type"] == "mb:startup"
+    assert "time_str" in evt1, "FALTA time_str — la UI mostrará 'undefined'"
+    assert "color" in evt1, "FALTA color — la UI mostrará 'undefined'"
+    assert "category" in evt1, "FALTA category — la UI mostrará 'undefined'"
+    assert "prefix" in evt1, "FALTA prefix — el filtro no funcionará"
+    assert evt1["time_str"] != "", "time_str no debe estar vacío"
+    assert evt1["prefix"] == "mb", f"prefix debe ser 'mb', got '{evt1.get('prefix')}'"
+    print(f"[OK] add_event() formatea eventos: time_str={evt1['time_str']!r}, color={evt1['color']!r}, category={evt1['category']!r}")
 
-    # 4. Filtrar por project_id
+    # 4. Verificar que project_id se preserva para filtrado
     p1_events = sse.get_events(project_id="proj_001")
     assert len(p1_events) == 1
     assert p1_events[0]["project_id"] == "proj_001"
@@ -256,22 +281,30 @@ if __name__ == "__main__":
     assert len(sse.get_events()) == 0
     print("[OK] clear_buffer() limpia el buffer")
 
-    # 7. Evento con timestamp pre-existente no se sobrescribe
-    custom_ts = "2025-01-01T00:00:00+00:00"
-    sse.add_event({
-        "type": "custom",
-        "project_id": "proj_003",
-        "message": "test",
-        "timestamp": custom_ts,
-    })
-    evt = sse.get_events(project_id="proj_003")[0]
-    assert evt["timestamp"] == custom_ts
-    print("[OK] Timestamp pre-existente se preserva")
+    # 7. TEST DE INTEGRACIÓN: notify() → callback → buffer formateado
+    from core.notifications import notify, clear_callbacks, _default_log_callback
+    clear_callbacks()
+    register_callback(_default_log_callback)  # re-registrar el default
+    sse.register_notification_callback()
+    notify("mb:startup", "Comando del sandbox no encontrado", {"step": "sandbox_cmd_not_found"})
+    buf_events = sse.get_events()
+    assert len(buf_events) >= 1, "notify() debe haber poblado el buffer SSE"
+    evt_notif = buf_events[-1]
+    assert evt_notif["message"] == "Comando del sandbox no encontrado", f"Mensaje incorrecto: {evt_notif['message']}"
+    assert "time_str" in evt_notif, "Evento de notify() falta time_str"
+    assert "color" in evt_notif, "Evento de notify() falta color"
+    assert "category" in evt_notif, "Evento de notify() falta category"
+    # Verificar que NO es [object Object] ni undefined
+    assert not evt_notif["message"].startswith("{"), "El mensaje no debe ser un dict serializado"
+    print(f"[OK] notify() → callback → buffer formateado correctamente")
+    print(f"     message={evt_notif['message']!r}")
+    print(f"     time_str={evt_notif['time_str']!r}, color={evt_notif['color']!r}, category={evt_notif['category']!r}")
     sse.clear_buffer()
+    clear_callbacks()
+    register_callback(_default_log_callback)  # dejar limpio
 
     # 8. Thread-safety
     errors: list = []
-
     def writer(i: int) -> None:
         try:
             sse.add_event({
@@ -291,21 +324,14 @@ if __name__ == "__main__":
     assert len(sse.get_events()) == 100
     print("[OK] Thread-safety verificado (100 threads concurrentes)")
 
-    # 9. Formato de evento cumple la especificación
-    sse.clear_buffer()
-    sse.add_event({
-        "type": "test_type",
-        "project_id": "p_test",
-        "message": "test_msg",
-        "data": {"key": "value"},
-    })
-    evt = sse.get_events()[0]
-    assert evt["type"] == "test_type"
-    assert evt["project_id"] == "p_test"
-    assert evt["message"] == "test_msg"
-    assert evt["data"] == {"key": "value"}
-    assert "timestamp" in evt
-    print("[OK] Formato de evento cumple especificación")
+    # 9. Verificar que TODOS los eventos formateados tienen campos de UI
+    sse_events = sse.get_events()
+    for i, ev in enumerate(sse_events):
+        assert "time_str" in ev, f"Evento {i} falta time_str"
+        assert "color" in ev, f"Evento {i} falta color"
+        assert "category" in ev, f"Evento {i} falta category"
+        assert "prefix" in ev, f"Evento {i} falta prefix"
+    print("[OK] Todos los 100 eventos tienen campos de formato para UI")
 
     print()
     print("=== Todas las validaciones pasaron ===")

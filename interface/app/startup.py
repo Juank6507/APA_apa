@@ -37,7 +37,7 @@ if __name__ == "__main__" and __package__ is None:
 try:
     from .config import logger, MODEL_BROKER_URL
 except ImportError:
-    from app.config_apa import logger, MODEL_BROKER_URL
+    from app.config_apa import logger, MODEL_BROKER_URL, MODEL_BROKER_START_CMD, MODEL_BROKER_START_DIR
 
 try:
     from .state import AppState
@@ -62,10 +62,13 @@ except ImportError:
     _router_available = False
 
 try:
-    from core.notifications import notify
+    from core.notifications import notify, register_callback, clear_callbacks, _default_log_callback
     _notifications_available = True
 except ImportError:
     notify = None
+    register_callback = None
+    clear_callbacks = None
+    _default_log_callback = None
     _notifications_available = False
 
 
@@ -73,6 +76,19 @@ except ImportError:
 
 MB_HEALTH_TIMEOUT: float = 5.0
 MB_STARTUP_TIMEOUT: float = 15.0
+
+
+def _mb_startup_progress(step: str, message: str, data: dict = None) -> None:
+    """Callback de progreso para el arranque de MB.
+
+    Envía notificaciones a la interfaz de usuario sobre cada paso
+    del proceso de conexión con Model Broker.
+    """
+    if _notifications_available and notify is not None:
+        try:
+            notify("mb:startup", message, {"step": step, **(data or {})})
+        except Exception:
+            pass
 
 
 # ── Funciones principales ────────────────────────────────────────────────
@@ -117,7 +133,13 @@ def init_subsystems(state: "AppState" = None) -> dict:
 
     if _mb_launcher_available and ensure_mb_running is not None:
         try:
-            mb_ok = ensure_mb_running(mb_url, timeout=MB_STARTUP_TIMEOUT)
+            mb_ok = ensure_mb_running(
+                mb_url,
+                timeout=MB_STARTUP_TIMEOUT,
+                on_progress=_mb_startup_progress,
+                start_cmd=MODEL_BROKER_START_CMD,
+                start_dir=MODEL_BROKER_START_DIR,
+            )
         except Exception as exc:
             error_msg = f"Error al lanzar MB: {exc}"
             logger.error(error_msg)
@@ -160,8 +182,10 @@ def init_subsystems(state: "AppState" = None) -> dict:
     logger.info("Startup paso 3/3: Notificando estado del sistema")
     if _notifications_available and notify is not None:
         try:
+            startup_msg = f"Sistema iniciado — MB={'disponible' if mb_ok else 'no disponible'}, modo={router_mode}"
             notify(
                 "system:startup",
+                startup_msg,
                 {
                     "mb_available": mb_ok,
                     "router_mode": router_mode,
@@ -352,6 +376,47 @@ if __name__ == "__main__":
     thread.join(timeout=30)  # Esperar a que termine
     assert state3.startup_info != {} or len(state3.startup_info.get("errors", [])) > 0
     print(f"[OK] init_subsystems_threaded ejecutó y actualizó estado")
+
+    # 8. TEST CRÍTICO: Verificar que notify() recibe strings, no dicts
+    if _notifications_available and clear_callbacks and register_callback and _default_log_callback:
+        _captured_notify = []
+        def _capture_notify(event_type, message, data):
+            _captured_notify.append((event_type, message, data))
+        clear_callbacks()
+        register_callback(_default_log_callback)
+        register_callback(_capture_notify)
+        # Ejecutar el callback de progreso igual que lo hace init_subsystems
+        _mb_startup_progress("test_step", "Mensaje de prueba", {"key": "val"})
+        assert len(_captured_notify) == 1, f"Debe haber 1 notificación, hay {len(_captured_notify)}"
+        et, msg, dat = _captured_notify[0]
+        assert isinstance(msg, str), f"El mensaje debe ser string, es {type(msg).__name__}: {msg!r}"
+        assert not isinstance(msg, dict), "El mensaje NUNCA debe ser un dict (causa [object Object] en la UI)"
+        assert isinstance(dat, dict), f"El data debe ser dict, es {type(dat).__name__}"
+        assert dat.get("step") == "test_step", f"data.step debe ser 'test_step', got {dat.get('step')}"
+        print(f"[OK] _mb_startup_progress envía string como mensaje: {msg!r}")
+        print(f"     data={dat}")
+        clear_callbacks()
+        register_callback(_default_log_callback)  # dejar limpio
+    else:
+        # Fallback: verificar la firma directamente por inspección de código
+        import inspect
+        src = inspect.getsource(_mb_startup_progress)
+        assert 'notify("mb:startup", message,' in src, "_mb_startup_progress debe pasar 'message' como 2do arg de notify()"
+        assert 'notify("mb:startup", {"' not in src, "_mb_startup_progress NO debe pasar un dict literal como 2do arg"
+        print("[OK] _mb_startup_progress firma verificada por inspección de código (sin core disponible)")
+
+    # 9. Verificar que la notificación system:startup también usa string
+    import inspect as _insp
+    _init_src = _insp.getsource(init_subsystems)
+    assert 'notify(' in _init_src
+    # Buscar la línea de notify system:startup
+    for _line in _init_src.split('\n'):
+        if 'system:startup' in _line and 'notify' in _line:
+            # Verificar que el 2do argumento no es un dict literal (que empieza con {)
+            assert '{\"mb_available"' not in _line and '{"mb_available"' not in _line, \
+                f"system:startup notify() pasa dict como mensaje: {_line.strip()}"
+            break
+    print("[OK] system:startup notify() no pasa dict como mensaje")
 
     print()
     print("=== Todas las validaciones pasaron ===")

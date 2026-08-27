@@ -124,18 +124,13 @@ async def on_startup() -> None:
     """Evento de inicio de la aplicación.
 
     El servidor uvicorn YA está escuchando cuando este evento se ejecuta.
-    Aquí lanzamos en segundo plano los subsistemas pesados (MB, router, pool)
-    para que el usuario pueda acceder a la interfaz web inmediatamente,
-    sin esperar a que el sandbox o el MB respondan.
+    PRIMERO registramos el callback SSE para capturar TODAS las notificaciones,
+    INCLUYENDO las del arranque. Luego lanzamos los subsistemas en segundo plano.
     """
-    # init_subsystems_threaded lanza init_subsystems en un hilo daemon.
-    # Ese hilo hace:
-    #   1. ensure_mb_running() — arranca MB como subprocess silencioso
-    #   2. initialize_router() — valida MB vía HTTP, prepara pool
-    #   3. notify() — registra evento de startup
-    # Todo eso va en background. El servidor sigue respondiendo mientras tanto.
-    init_subsystems_threaded(state=state)
+    # Registrar callback SSE ANTES de lanzar startup para no perder notificaciones
     sse.register_notification_callback()
+    # Ahora lanzar subsistemas en segundo plano
+    init_subsystems_threaded(state=state)
     logger.info("APA application started — servidor escuchando, subsistemas en background")
 
 

@@ -39,6 +39,7 @@ from core.notifications import (
     get_recent_events,
     notify,
 )
+from core.notification_ui_bridge import format_event, get_full_summary as _bridge_get_full_summary
 from core import notification_ui_bridge
 
 
@@ -66,53 +67,56 @@ class NotificationsHandler:
     # ── Lógica de negocio ─────────────────────────────────────────────
 
     def get_recent(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Obtiene las notificaciones más recientes.
+        """Obtiene las notificaciones más recientes, formateadas para la UI.
 
-        Delega en core.notifications.get_recent_events.
+        Delega en core.notifications.get_recent_events y aplica
+        format_event() a cada evento para añadir time_str, color,
+        category y prefix que la UI necesita.
 
         Args:
             limit: Cantidad máxima de eventos a retornar.
 
         Returns:
-            Lista de diccionarios de eventos.
+            Lista de diccionarios de eventos formateados.
         """
         try:
-            events = get_recent_events(limit=limit)
-            if isinstance(events, list):
-                return events
+            events = get_recent_events(n=limit)
+            if isinstance(events, list) and len(events) > 0:
+                # Formatear cada evento para que la UI tenga time_str, color, etc.
+                formatted = []
+                for e in events:
+                    try:
+                        formatted.append(format_event(e))
+                    except Exception:
+                        formatted.append(e)
+                return formatted
         except Exception as exc:
             logger.error(
                 "NotificationsHandler: error en get_recent_events: %s", exc
             )
 
-        # Fallback: eventos del buffer SSE
+        # Fallback: eventos del buffer SSE (ya formateados)
         return self.sse.get_events()
 
-    def get_summary(self) -> str:
-        """Obtiene un resumen formateado de las notificaciones.
+    def get_summary(self) -> Dict[str, Any]:
+        """Obtiene un resumen de modelos y agentes.
 
         Delega en core.notification_ui_bridge.get_full_summary.
 
         Returns:
-            Cadena de texto con el resumen formateado.
+            Diccionario con claves 'models' y 'agents'.
         """
         try:
-            summary = notification_ui_bridge.get_full_summary()
-            if isinstance(summary, str):
+            summary = _bridge_get_full_summary()
+            if isinstance(summary, dict):
                 return summary
         except Exception as exc:
             logger.error(
                 "NotificationsHandler: error en get_full_summary: %s", exc
             )
 
-        # Fallback: resumen simple del buffer
-        events = self.sse.get_events()
-        if not events:
-            return "No hay notificaciones recientes."
-        return (
-            f"{len(events)} notificaciones en buffer. "
-            f"Última: {events[-1].get('message', 'N/A')}"
-        )
+        # Fallback: resumen vacío
+        return {'models': {'total': 0, 'available': 0}, 'agents': {}}
 
     async def _event_generator(self) -> AsyncGenerator[str, None]:
         """Genera el flujo SSE de notificaciones en tiempo real.
@@ -173,14 +177,14 @@ def register_notification_routes(
         return {"events": events}
 
     @app.get("/notifications/summary")
-    async def get_notifications_summary() -> Dict[str, str]:
-        """Retorna un resumen formateado de las notificaciones.
+    async def get_notifications_summary() -> Dict[str, Any]:
+        """Retorna un resumen de modelos y agentes.
 
         Returns:
-            JSON con la clave "summary".
+            JSON con las claves 'models' y 'agents'.
         """
         summary = handler.get_summary()
-        return {"summary": summary}
+        return summary
 
     @app.get("/notifications/stream")
     async def stream_notifications_endpoint() -> StreamingResponse:
@@ -222,25 +226,33 @@ if __name__ == "__main__":
     assert isinstance(events, list)
     print(f"[OK] get_recent retorna lista: {len(events)} eventos")
 
-    # 3. get_summary retorna string
+    # 3. get_summary retorna dict con models y agents
     summary = handler.get_summary()
-    assert isinstance(summary, str)
-    print(f"[OK] get_summary retorna string: {summary[:60]}...")
+    assert isinstance(summary, dict), f"get_summary debe retornar dict, got {type(summary).__name__}"
+    assert "models" in summary, "get_summary debe tener clave 'models'"
+    assert "agents" in summary, "get_summary debe tener clave 'agents'"
+    print(f"[OK] get_summary retorna dict con models y agents")
 
-    # 4. get_recent con eventos en el buffer
+    # 4. get_recent con eventos en el buffer — verificar formato para UI
     sse.add_event({
-        "type": "info",
+        "type": "mb:startup",
         "project_id": "p1",
         "message": "Pipeline iniciado",
     })
     sse.add_event({
-        "type": "warning",
+        "type": "system:error",
         "project_id": "p2",
         "message": "Cuota al 80%",
     })
     events_with_data = handler.get_recent()
     assert len(events_with_data) >= 2
-    print(f"[OK] get_recent con datos en buffer: {len(events_with_data)} eventos")
+    # TEST CRÍTICO: eventos tienen campos de formato para UI
+    for i, ev in enumerate(events_with_data):
+        assert "time_str" in ev, f"Evento {i} falta time_str — la UI mostrará 'undefined'"
+        assert "color" in ev, f"Evento {i} falta color — la UI mostrará 'undefined'"
+        assert "category" in ev, f"Evento {i} falta category — la UI mostrará 'undefined'"
+        assert isinstance(ev.get("message"), str), f"Evento {i} message no es string: {type(ev.get('message'))}"
+    print(f"[OK] get_recent devuelve eventos formateados para UI (time_str, color, category)")
     sse.clear_buffer()
 
     # 5. register_notification_routes no crashea
