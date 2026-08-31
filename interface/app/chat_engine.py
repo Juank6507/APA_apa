@@ -223,6 +223,7 @@ class ChatEngine:
             logger.debug("ChatEngine: Error al notificar: %s", exc)
 
         return {
+            "success": True,
             "response": response_text,
             "maturity_status": maturity_status,
             "model_used": model_name or "default",
@@ -393,13 +394,10 @@ class ChatEngine:
         messages: List[Dict[str, str]],
         model: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Procesa el mensaje a través del ChatSDDFlow.
+        """Procesa el mensaje a traves del ChatSDDFlow.
 
-        El ChatSDDFlow maneja:
-        - Evaluación de madurez de los 5 aspectos indispensables
-        - Escalado de modelo cuando la madurez es suficiente
-        - Solicitud de modelo tipo "planning" al MB cuando los
-          5 aspectos son maduros
+        Usa el metodo process() de ChatSDDFlowManager, que es el punto de
+        entrada real del flujo de 3 ramas (A/B/C).
 
         Args:
             project_id: ID del proyecto.
@@ -410,49 +408,34 @@ class ChatEngine:
             Diccionario con response, maturity_status, model_used.
         """
         if self._sdd_flow is None:
-            raise RuntimeError("ChatSDDFlow no está inicializado")
+            raise RuntimeError("ChatSDDFlow no esta inicializado")
 
-        # Delegar la evaluación de madurez al SDD flow
-        maturity = await asyncio.to_thread(
-            self._sdd_flow.evaluate_maturity,
-            project_id=project_id,
-            messages=messages,
+        # Construir un objeto compatible con la interfaz de process()
+        import types
+        request = types.SimpleNamespace(
+            message=messages[-1]["content"] if messages else "",
+            history=messages[:-1] if len(messages) > 1 else [],
+            project_path=None,
+            is_escalated=False,
         )
 
-        maturity_status = maturity if isinstance(maturity, dict) else {}
+        self_context_text = self._load_self_context() or ""
 
-        # Verificar si los 5 aspectos indispensables son maduros
-        all_mature = maturity_status.get("all_mature", False)
-        mature_count = maturity_status.get("mature_count", 0)
-
-        model_used = model or "default"
-
-        # Si los 5 aspectos son maduros, solicitar modelo "planning" al MB
-        if all_mature and hasattr(self._state, "mb_available") and self._state.mb_available:
-            try:
-                best = await asyncio.to_thread(
-                    select_model, task_type="planning"
-                )
-                if isinstance(best, str) and best:
-                    model_used = best
-                    logger.info(
-                        "ChatEngine: Modelo escalado a %s (5 aspectos maduros)",
-                        model_used,
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "ChatEngine: No se pudo escalar modelo: %s", exc
-                )
-
-        # Generar la respuesta con el modelo seleccionado
-        response_text = await self._call_llm_async(
-            messages=messages, model=model_used,
+        # process() es async — no necesita to_thread
+        sdd_result = await self._sdd_flow.process(
+            request=request,
+            self_context=self_context_text,
+            project_context="",
         )
+
+        response_text = sdd_result.get("response", "")
+        model_name = sdd_result.get("model_used", model or "default")
+        maturity_status = sdd_result.get("sdd_status", {})
 
         return {
             "response": response_text,
             "maturity_status": maturity_status,
-            "model_used": model_used,
+            "model_used": model_name,
         }
 
     # ── Gestión de conversación ───────────────────────────────────────

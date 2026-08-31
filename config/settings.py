@@ -15,7 +15,8 @@
 #   OLLAMA_BASE_URL          — URL de Ollama local (default: http://localhost:11434)
 #   OLLAMA_DEFAULT_MODEL     — Modelo Ollama por defecto (default: llama3.1)
 #   APA_LOG_LEVEL            — Nivel de log (default: INFO)
-#   NAS_SANDBOX_PATH         — Path sandbox (default: /tmp/apa_sandbox)
+#   MODEL_BROKER_SANDBOX_PATH — Directorio del sandbox MB (ej: mini-services/mb-sandbox)
+#   NAS_SANDBOX_PATH         — Path sandbox de proyectos (default: /tmp/apa_sandbox)
 #
 # Validacion:
 #     python config/settings_v2.py
@@ -247,12 +248,13 @@ class Settings:
 
     @property
     def model_broker_start_dir(self) -> str:
-        """Directorio de trabajo para arrancar MB en modo sandbox.
+        """Directorio de trabajo para arrancar MB en modo sandbox (desarrollo).
 
-        Lee SANDBOX_PATH del entorno (misma variable que el sandbox general).
+        Lee MODEL_BROKER_SANDBOX_PATH del entorno.
+        Variable INDEPENDIENTE de SANDBOX_PATH (que es para el sandbox de proyectos de APA).
         Si esta vacio, APA no intenta arrancar MB localmente.
         """
-        return os.environ.get("SANDBOX_PATH", "").strip()
+        return os.environ.get("MODEL_BROKER_SANDBOX_PATH", "").strip()
 
     # --- Emergency (Ollama local) ---
     @property
@@ -332,7 +334,7 @@ def _log_startup_warnings() -> None:
         )
     else:
         logger.info(
-            "settings: MB sandbox no configurado (sin MODEL_BROKER_START_CMD o SANDBOX_PATH)"
+            "settings: MB sandbox no configurado (sin MODEL_BROKER_START_CMD o MODEL_BROKER_SANDBOX_PATH)"
         )
 
     logger.info(

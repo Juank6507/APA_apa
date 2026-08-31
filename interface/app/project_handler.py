@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException
 
-from app.config_apa import logger
+from app.config_apa import logger, WORK_DIRECTORIES
 from app.models import AnalyzeRequest, RunRequest
 from app.state import AppState
 
@@ -85,27 +85,42 @@ class ProjectHandler:
         """Lista todos los proyectos disponibles.
 
         Delega en core.projects_handler.list_projects y retorna
-        la lista cruda de proyectos.
+        la lista de proyectos.
 
         Returns:
             Lista de diccionarios con datos de cada proyecto.
         """
+        # Si core.projects_handler no está disponible, usar estado
         if core_projects is None:
-            # Fallback: proyectos del estado
-            if isinstance(self.state.projects, dict):
-                return [
-                    {"id": pid, **data}
-                    for pid, data in self.state.projects.items()
-                ]
-            return []
+            return self._list_from_state()
+
+        # Obtener los datos que core.projects_handler necesita
+        projects_data = self.state.projects if isinstance(self.state.projects, dict) else {}
+        specs_dir = WORK_DIRECTORIES.get("specs_dir")
+
+        # Si no hay specs_dir, usar estado directamente
+        if not specs_dir or not isinstance(specs_dir, Path):
+            return self._list_from_state()
+
         try:
-            projects = core_projects.list_projects()
-            if isinstance(projects, list):
-                return projects
+            result = core_projects.list_projects(projects_data, specs_dir)
+            if isinstance(result, dict) and "projects" in result:
+                return result["projects"]
+            if isinstance(result, list):
+                return result
+        except TypeError as exc:
+            # Firma de list_projects cambió — log nivel debug, no error
+            logger.debug(
+                "ProjectHandler: core.projects_handler.list_projects() "
+                "firma incompatible: %s — usando estado", exc
+            )
         except Exception as exc:
             logger.error("ProjectHandler: error listando proyectos: %s", exc)
 
-        # Fallback: proyectos del estado
+        return self._list_from_state()
+
+    def _list_from_state(self) -> List[Dict[str, Any]]:
+        """Retorna la lista de proyectos desde el estado en memoria."""
         if isinstance(self.state.projects, dict):
             return [
                 {"id": pid, **data}
@@ -128,24 +143,42 @@ class ProjectHandler:
             HTTPException: Si el proyecto no se encuentra.
         """
         if core_projects is None:
-            # Fallback: buscar en el estado
-            try:
-                return self.state.get_project(project_id)
-            except ValueError:
+            return self._detail_from_state(project_id)
+
+        # Obtener los datos que core.projects_handler necesita
+        projects_data = self.state.projects if isinstance(self.state.projects, dict) else {}
+        specs_dir = WORK_DIRECTORIES.get("specs_dir")
+
+        if not specs_dir or not isinstance(specs_dir, Path):
+            return self._detail_from_state(project_id)
+
+        try:
+            detail = core_projects.get_project_detail(
+                project_id, projects_data, specs_dir
+            )
+            if detail is not None and detail.get("_status") != 404:
+                return detail
+            if detail and detail.get("_status") == 404:
                 raise HTTPException(
                     status_code=404,
                     detail=f"Proyecto no encontrado: {project_id}",
                 )
-        try:
-            detail = core_projects.get_project_detail(project_id)
-            if detail is not None:
-                return detail
+        except HTTPException:
+            raise
+        except TypeError as exc:
+            logger.debug(
+                "ProjectHandler: core.projects_handler.get_project_detail() "
+                "firma incompatible: %s — usando estado", exc
+            )
         except Exception as exc:
             logger.error(
                 "ProjectHandler: error obteniendo detalle: %s", exc
             )
 
-        # Fallback: buscar en el estado
+        return self._detail_from_state(project_id)
+
+    def _detail_from_state(self, project_id: str) -> Dict[str, Any]:
+        """Retorna el detalle de un proyecto desde el estado en memoria."""
         try:
             return self.state.get_project(project_id)
         except ValueError:
@@ -298,8 +331,6 @@ if __name__ == "__main__":
     _MockOrch.return_value = MagicMock()
 
     # Forzar flag de disponibilidad para que el handler use el mock
-    # (en Windows del Director, core.orchestrator puede no estar actualizado
-    # y el flag queda en False; en validación forzamos True para usar el mock)
     import sys as _sys
     _sys.modules[_MODULE_NAME]._orchestrator_available = True
 

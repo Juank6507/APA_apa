@@ -1,7 +1,8 @@
 {
   "chat": {
-    "model": "gpt-4o",
-    "provider": "openai",
-    "updated_at": 1787679144.9986715
+    "model": "sandbox-default",
+    "provider": "sandbox",
+    "updated_at": 1788137623.6112988,
+    "latency_ms": 2500
   }
 }
